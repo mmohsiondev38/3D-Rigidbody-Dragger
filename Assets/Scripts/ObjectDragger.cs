@@ -33,6 +33,7 @@ public class ObjectDragger : MonoBehaviour
     bool grabbedHadRigidbody;
     bool originalUseGravity;
     bool originalIsKinematic;
+    Draggable grabbedDraggable;
 
     [Tooltip("Maximum velocity (units/sec) allowed when dragging with physics")]
     public float maxDragVelocity = 10f;
@@ -40,9 +41,12 @@ public class ObjectDragger : MonoBehaviour
     [Tooltip("Follow strength used to convert distance-to-target into desired velocity")]
     public float followSpeed = 8f;
 
+    LevelManager levelManager;
+
     void Awake()
     {
         cam = Camera.main;
+        levelManager = FindFirstObjectByType<LevelManager>();
 
         pointerPosAction = new InputAction("PointerPosition", InputActionType.PassThrough, "<Pointer>/position");
         pointerPosAction.performed += ctx => OnPointerMove(ctx.ReadValue<Vector2>());
@@ -66,16 +70,22 @@ public class ObjectDragger : MonoBehaviour
 
     void OnPointerDown()
     {
-        if (cam == null) cam = Camera.main;
         Vector2 screenPos = pointerPosAction.ReadValue<Vector2>();
         Ray ray = cam.ScreenPointToRay(screenPos);
         if (Physics.Raycast(ray, out RaycastHit hit, 100f, draggableLayer))
         {
-            grabbed = hit.transform;
+            Draggable draggable = hit.collider.GetComponentInParent<Draggable>();
+            if (draggable != null && draggable.snapped)
+            {
+                return;
+            }
+
+            grabbed = hit.collider.attachedRigidbody != null ? hit.collider.attachedRigidbody.transform : hit.transform;
+            grabbedDraggable = draggable;
             originalY = grabbed.position.y;
 
             // handle Rigidbody (make kinematic while dragging)
-            grabbedRb = grabbed.GetComponent<Rigidbody>();
+            grabbedRb = hit.collider.attachedRigidbody != null ? hit.collider.attachedRigidbody : grabbed.GetComponent<Rigidbody>();
             grabbedHadRigidbody = grabbedRb != null;
             if (grabbedHadRigidbody)
             {
@@ -102,7 +112,6 @@ public class ObjectDragger : MonoBehaviour
     void OnPointerMove(Vector2 screenPos)
     {
         if (grabbed == null) return;
-        if (cam == null) cam = Camera.main;
         Ray ray = cam.ScreenPointToRay(screenPos);
         if (dragPlane.Raycast(ray, out float enter))
         {
@@ -116,6 +125,7 @@ public class ObjectDragger : MonoBehaviour
     void Update()
     {
         if (grabbed == null) return;
+        if (TrySnapToTarget()) return;
         // if grabbed has Rigidbody, physics movement handled in FixedUpdate
         if (grabbedHadRigidbody && grabbedRb != null) return;
         // smooth-move non-Rigidbody objects
@@ -126,6 +136,7 @@ public class ObjectDragger : MonoBehaviour
     void FixedUpdate()
     {
         if (grabbed == null) return;
+        if (TrySnapToTarget()) return;
         if (!(grabbedHadRigidbody && grabbedRb != null)) return;
 
         // compute desired velocity towards targetPosition
@@ -150,6 +161,16 @@ public class ObjectDragger : MonoBehaviour
     {
         if (grabbed == null) return;
 
+        if (grabbedDraggable != null && grabbedDraggable.snapped)
+        {
+            grabbed = null;
+            grabbedRb = null;
+            grabbedDraggable = null;
+            grabbedHadRigidbody = false;
+            currentVelocity = Vector3.zero;
+            return;
+        }
+
         if (grabbedHadRigidbody && grabbedRb != null)
         {
             if (dropOnRelease)
@@ -167,7 +188,44 @@ public class ObjectDragger : MonoBehaviour
 
         grabbed = null;
         grabbedRb = null;
+        grabbedDraggable = null;
         grabbedHadRigidbody = false;
         currentVelocity = Vector3.zero;
+    }
+
+    bool TrySnapToTarget()
+    {
+        if (grabbed == null || grabbedDraggable == null || grabbedDraggable.snapped) return false;
+        if (grabbedDraggable.draggableTarget == null) return false;
+
+        float distance = Vector3.Distance(grabbed.position, grabbedDraggable.draggableTarget.position);
+        if (distance > grabbedDraggable.snapDistance) return false;
+
+        Vector3 snapPosition = grabbedDraggable.draggableTarget.position;
+        Quaternion snapRotation = grabbedDraggable.draggableTarget.rotation;
+
+        if (grabbedHadRigidbody && grabbedRb != null)
+        {
+            grabbedRb.linearVelocity = Vector3.zero;
+            grabbedRb.angularVelocity = Vector3.zero;
+            grabbedRb.isKinematic = true;
+            grabbedRb.useGravity = false;
+            grabbedRb.position = snapPosition;
+            grabbedRb.rotation = snapRotation;
+        }
+
+        grabbed.SetPositionAndRotation(snapPosition, snapRotation);
+        Physics.SyncTransforms();
+
+        grabbedDraggable.draggableTarget.gameObject.SetActive(false);
+        grabbedDraggable.snapped = true;
+
+        levelManager?.CheckLevelComplete();
+        grabbed = null;
+        grabbedRb = null;
+        grabbedHadRigidbody = false;
+        grabbedDraggable = null;
+        currentVelocity = Vector3.zero;
+        return true;
     }
 }
