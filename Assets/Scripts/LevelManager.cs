@@ -6,7 +6,8 @@ public class LevelManager : MonoBehaviour
     public List<Draggable> draggables = new();
 
     bool levelCompleted;
-
+    public System.Action onLevelWin;
+    public System.Action onLevelFail;
     void Update()
     {
         CheckLevelComplete();
@@ -32,6 +33,6 @@ public class LevelManager : MonoBehaviour
     public void LevelComplete()
     {
         levelCompleted = true;
-        Debug.Log("Level Completed");
+        onLevelWin?.Invoke();
     }
 }

@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using System.Collections;
 
 public class ObjectDragger : MonoBehaviour
 {
@@ -75,7 +76,7 @@ public class ObjectDragger : MonoBehaviour
         if (Physics.Raycast(ray, out RaycastHit hit, 100f, draggableLayer))
         {
             Draggable draggable = hit.collider.GetComponentInParent<Draggable>();
-            if (draggable != null && draggable.snapped)
+            if (draggable != null && (draggable.snapped || draggable.snapping))
             {
                 return;
             }
@@ -125,7 +126,7 @@ public class ObjectDragger : MonoBehaviour
     void Update()
     {
         if (grabbed == null) return;
-        if (TrySnapToTarget()) return;
+        if (TryStartSnap()) return;
         // if grabbed has Rigidbody, physics movement handled in FixedUpdate
         if (grabbedHadRigidbody && grabbedRb != null) return;
         // smooth-move non-Rigidbody objects
@@ -136,7 +137,7 @@ public class ObjectDragger : MonoBehaviour
     void FixedUpdate()
     {
         if (grabbed == null) return;
-        if (TrySnapToTarget()) return;
+        if (TryStartSnap()) return;
         if (!(grabbedHadRigidbody && grabbedRb != null)) return;
 
         // compute desired velocity towards targetPosition
@@ -193,39 +194,123 @@ public class ObjectDragger : MonoBehaviour
         currentVelocity = Vector3.zero;
     }
 
-    bool TrySnapToTarget()
+    bool TryStartSnap()
     {
-        if (grabbed == null || grabbedDraggable == null || grabbedDraggable.snapped) return false;
+        if (grabbed == null || grabbedDraggable == null || grabbedDraggable.snapped || grabbedDraggable.snapping) return false;
         if (grabbedDraggable.draggableTarget == null) return false;
 
         float distance = Vector3.Distance(grabbed.position, grabbedDraggable.draggableTarget.position);
         if (distance > grabbedDraggable.snapDistance) return false;
 
-        Vector3 snapPosition = grabbedDraggable.draggableTarget.position;
-        Quaternion snapRotation = grabbedDraggable.draggableTarget.rotation;
+        Transform snapTarget = grabbedDraggable.draggableTarget;
+        Draggable draggable = grabbedDraggable;
+        Transform snapObject = grabbed;
+        Rigidbody snapRb = grabbedRb;
+        bool hadRigidbody = grabbedHadRigidbody;
 
-        if (grabbedHadRigidbody && grabbedRb != null)
-        {
-            grabbedRb.linearVelocity = Vector3.zero;
-            grabbedRb.angularVelocity = Vector3.zero;
-            grabbedRb.isKinematic = true;
-            grabbedRb.useGravity = false;
-            grabbedRb.position = snapPosition;
-            grabbedRb.rotation = snapRotation;
-        }
-
-        grabbed.SetPositionAndRotation(snapPosition, snapRotation);
-        Physics.SyncTransforms();
-
-        grabbedDraggable.draggableTarget.gameObject.SetActive(false);
-        grabbedDraggable.snapped = true;
-
-        levelManager?.CheckLevelComplete();
+        draggable.snapping = true;
         grabbed = null;
         grabbedRb = null;
         grabbedHadRigidbody = false;
         grabbedDraggable = null;
         currentVelocity = Vector3.zero;
+
+        StartCoroutine(SnapRoutine(snapObject, snapRb, hadRigidbody, draggable, snapTarget));
         return true;
+    }
+
+    IEnumerator SnapRoutine(Transform snapObject, Rigidbody snapRb, bool hadRigidbody, Draggable draggable, Transform snapTarget)
+    {
+        if (snapObject == null || draggable == null || snapTarget == null)
+        {
+            if (draggable != null) draggable.snapping = false;
+            yield break;
+        }
+
+        Vector3 startPosition = hadRigidbody && snapRb != null ? snapRb.position : snapObject.position;
+        Quaternion startRotation = hadRigidbody && snapRb != null ? snapRb.rotation : snapObject.rotation;
+        Vector3 startScale = snapObject.localScale;
+        Vector3 targetPosition = snapTarget.position;
+        Quaternion targetRotation = snapTarget.rotation;
+
+        if (hadRigidbody && snapRb != null)
+        {
+            snapRb.linearVelocity = Vector3.zero;
+            snapRb.angularVelocity = Vector3.zero;
+            snapRb.isKinematic = true;
+            snapRb.useGravity = false;
+        }
+
+        float lerpDuration = Mathf.Max(0.0001f, draggable.snapLerpDuration);
+        float elapsed = 0f;
+
+        while (elapsed < lerpDuration)
+        {
+            float t = Mathf.Clamp01(elapsed / lerpDuration);
+            t = Mathf.SmoothStep(0f, 1f, t);
+
+            Vector3 currentPosition = Vector3.Lerp(startPosition, targetPosition, t);
+            Quaternion currentRotation = Quaternion.Slerp(startRotation, targetRotation, t);
+
+            snapObject.SetPositionAndRotation(currentPosition, currentRotation);
+            if (hadRigidbody && snapRb != null)
+            {
+                snapRb.position = currentPosition;
+                snapRb.rotation = currentRotation;
+            }
+
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+
+        snapObject.SetPositionAndRotation(targetPosition, targetRotation);
+        if (hadRigidbody && snapRb != null)
+        {
+            snapRb.position = targetPosition;
+            snapRb.rotation = targetRotation;
+        }
+        Physics.SyncTransforms();
+
+        snapTarget.gameObject.SetActive(false);
+
+        float scaleDuration = Mathf.Max(0.0001f, draggable.snapScaleDuration);
+        float halfDuration = scaleDuration * 0.5f;
+        Vector3 pulseScale = startScale * draggable.snapScaleMultiplier;
+
+        elapsed = 0f;
+        while (elapsed < halfDuration)
+        {
+            float t = Mathf.Clamp01(elapsed / halfDuration);
+            t = Mathf.SmoothStep(0f, 1f, t);
+            snapObject.localScale = Vector3.Lerp(startScale, pulseScale, t);
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+
+        elapsed = 0f;
+        while (elapsed < halfDuration)
+        {
+            float t = Mathf.Clamp01(elapsed / halfDuration);
+            t = Mathf.SmoothStep(0f, 1f, t);
+            snapObject.localScale = Vector3.Lerp(pulseScale, startScale, t);
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+
+        snapObject.localScale = startScale;
+        draggable.snapped = true;
+        draggable.snapping = false;
+        GetLevelManager()?.CheckLevelComplete();
+        Physics.SyncTransforms();
+    }
+
+    LevelManager GetLevelManager()
+    {
+        if (levelManager == null)
+        {
+            levelManager = FindFirstObjectByType<LevelManager>();
+        }
+
+        return levelManager;
     }
 }
